@@ -17,6 +17,10 @@
           assertion = cfg.group == null || cfg.user != null;
           message = ''`services.github-runners.${name}`: Setting `group` while leaving `user` unset runs the service as `root`. If this is really what you want, set `user = "root"` explicitly'';
         }
+        {
+          assertion = !(cfg.tokenFile != null && cfg.githubAppConfig.enable);
+          message = "`services.github-runners.${name}`: The `tokenFile` option and `githubAppConfig` option cannot be used together. Set either tokenFile option or githubAppConfig";
+        }
       ]
     )
   );
@@ -123,11 +127,18 @@
                   ".runner"
                 ];
                 unconfigureRunner = writeScript "unconfigure" ''
+                  set -x
+                  ${lib.optionalString (cfg.githubAppConfig.enable != true) ''
+                  token_file=${lib.escapeShellArg cfg.tokenFile}
+                  ''}
+                  ### Hardcode for now so it doesn't break
+                  ### REMOVE
+                  token_file=/run/secrets/runner_token
                   copy_tokens() {
                     # Copy the configured token file to the state dir and allow the service user to read the file
-                    install --mode=666 ${lib.escapeShellArg cfg.tokenFile} "${newConfigTokenPath}"
+                    install --mode=666 $token_file "${newConfigTokenPath}"
                     # Also copy current file to allow for a diff on the next start
-                    install --mode=600 ${lib.escapeShellArg cfg.tokenFile} "${currentConfigTokenPath}"
+                    install --mode=600 $token_file "${currentConfigTokenPath}"
                   }
                   clean_state() {
                     find "$STATE_DIRECTORY/" -mindepth 1 -delete
@@ -141,7 +152,7 @@
                       || changed=1
                     # Also check the content of the token file
                     [[ -f "${currentConfigTokenPath}" ]] \
-                      && ${pkgs.diffutils}/bin/diff -q "${currentConfigTokenPath}" ${lib.escapeShellArg cfg.tokenFile} >/dev/null 2>&1 \
+                      && ${pkgs.diffutils}/bin/diff -q "${currentConfigTokenPath}" $token_file >/dev/null 2>&1 \
                       || changed=1
                     # If the config has changed, remove old state and copy tokens
                     if [[ "$changed" -eq 1 ]]; then
@@ -164,9 +175,19 @@
                   # Always clean workDir
                   find -H "$WORK_DIRECTORY" -mindepth 1 -delete
                 '';
+                generateToken = writeScript "test-script" ''
+                  set -x
+                  env
+                  echo "This is a test script"
+                  echo "Lets see if i can call it from another"
+                  echo "Without the script erroring"
+                  echo "${builtins.toJSON cfg.githubAppConfig}"
+
+                '';
                 configureRunner =
                   writeScript "configure" # bash
                     ''
+                      set -x
                       if [[ -e "${newConfigTokenPath}" ]]; then
                         echo "Configuring GitHub Actions Runner"
                         # shellcheck disable=SC2054  # don't complain about commas in --labels
@@ -222,11 +243,14 @@
                     ]
                   }"
                 )
-                [
-                  "+${unconfigureRunner}" # runs as root
-                  configureRunner
-                  setupWorkDir
-                ];
+                (
+                  lib.optionals (cfg.githubAppConfig.enable) [ "+${generateToken}" ] ++
+                  [
+                    "+${unconfigureRunner}" # runs as root
+                    configureRunner
+                    setupWorkDir
+                  ]
+                );
 
             # If running in ephemeral mode, restart the service on-exit (i.e., successful de-registration of the runner)
             # to trigger a fresh registration.
@@ -246,7 +270,8 @@
 
             InaccessiblePaths = [
               # Token file path given in the configuration, if visible to the service
-              "-${cfg.tokenFile}"
+              #"-${cfg.tokenFile}"
+              "/run/secrets/runner_token"
               # Token file in the state directory
               "${stateDir}/${currentConfigTokenFilename}"
             ];

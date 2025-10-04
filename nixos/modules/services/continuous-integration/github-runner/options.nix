@@ -60,7 +60,8 @@
             };
 
             tokenFile = lib.mkOption {
-              type = lib.types.path;
+              type = lib.types.nullOr lib.types.path;
+              default = null;
               description = ''
                 The full path to a file which contains either
 
@@ -100,6 +101,37 @@
                 so these are not recommended.
               '';
               example = "/run/secrets/github-runner/nixos.token";
+            };
+
+            githubAppConfig = lib.mkOption {
+              default = { };
+              description = ''
+                For when using github app to manage registering runners with GitHub
+              '';
+              type = lib.types.submodule {
+                options = {
+
+                  enable = lib.mkEnableOption "enable";
+
+                  githubAppInstallationIdFile = lib.mkOption {
+                    type = lib.types.path;
+                    example = "/run/secrets/github-runner/github-app-installation-id";
+                    description = "Installation ID of github app";
+                  };
+
+                  githubAppClientIdFile = lib.mkOption {
+                    type = lib.types.path;
+                    example = "/run/secrets/github-runner/github-app-id";
+                    description = "ClientId of github app";
+                  };
+
+                  githubAppPrivateKeyFile = lib.mkOption {
+                    type = lib.types.path;
+                    example = "/run/secrets/github-runner/github-app-private-key";
+                    description = "Github app private key file path";
+                  };
+                };
+              };
             };
 
             name = lib.mkOption {
