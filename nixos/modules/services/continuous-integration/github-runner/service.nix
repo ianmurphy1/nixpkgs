@@ -43,6 +43,11 @@
         logsDir = "%L/${systemdDir}";
         # Name of file stored in service state directory
         currentConfigTokenFilename = ".current-token";
+        regTokenPath =
+          if cfg.tokenFile != null then
+            cfg.tokenFile
+          else
+            "/run/secrets/${svcName}-${name}-token";
 
         workDir = if cfg.workDir == null then runtimeDir else cfg.workDir;
       in
@@ -106,16 +111,18 @@
 
                     ${lines}
                   '';
-                runnerRegistrationConfig = lib.getAttrs [
+                runnerRegistrationConfig = lib.getAttrs ([
                   "ephemeral"
                   "extraLabels"
                   "name"
                   "noDefaultLabels"
                   "runnerGroup"
-                  "tokenFile"
                   "url"
                   "workDir"
-                ] cfg;
+                ]
+                ++ lib.optional (cfg.tokenFile != null) "tokenFile"
+                ++ lib.optional (cfg.tokenFile == null) "githubAppConfig"
+                ) cfg;
                 newConfigPath = builtins.toFile "${svcName}-config.json" (builtins.toJSON runnerRegistrationConfig);
                 currentConfigPath = "$STATE_DIRECTORY/.nixos-current-config.json";
                 newConfigTokenPath = "$STATE_DIRECTORY/.new-token";
@@ -128,17 +135,18 @@
                 ];
                 unconfigureRunner = writeScript "unconfigure" ''
                   set -x
-                  ${lib.optionalString (cfg.githubAppConfig.enable != true) ''
-                  token_file=${lib.escapeShellArg cfg.tokenFile}
-                  ''}
-                  ### Hardcode for now so it doesn't break
-                  ### REMOVE
-                  token_file=/run/secrets/runner_token
+
                   copy_tokens() {
+                    ${generateToken} ${lib.escapeShellArgs [
+                        stateDir
+                        workDir
+                        logsDir
+                      ]
+                    }
                     # Copy the configured token file to the state dir and allow the service user to read the file
-                    install --mode=666 $token_file "${newConfigTokenPath}"
+                    install --mode=666 "${regTokenPath}" "${newConfigTokenPath}"
                     # Also copy current file to allow for a diff on the next start
-                    install --mode=600 $token_file "${currentConfigTokenPath}"
+                    install --mode=600 "${regTokenPath}" "${currentConfigTokenPath}"
                   }
                   clean_state() {
                     find "$STATE_DIRECTORY/" -mindepth 1 -delete
@@ -148,11 +156,11 @@
                     changed=0
                     # Check for module config changes
                     [[ -f "${currentConfigPath}" ]] \
-                      && ${pkgs.diffutils}/bin/diff -q '${newConfigPath}' "${currentConfigPath}" >/dev/null 2>&1 \
+                      && ${pkgs.diffutils}/bin/diff -q "${newConfigPath}" "${currentConfigPath}" >/dev/null 2>&1 \
                       || changed=1
                     # Also check the content of the token file
                     [[ -f "${currentConfigTokenPath}" ]] \
-                      && ${pkgs.diffutils}/bin/diff -q "${currentConfigTokenPath}" $token_file >/dev/null 2>&1 \
+                      && ${pkgs.diffutils}/bin/diff -q "${currentConfigTokenPath}" "${regTokenPath}" >/dev/null 2>&1 \
                       || changed=1
                     # If the config has changed, remove old state and copy tokens
                     if [[ "$changed" -eq 1 ]]; then
@@ -175,14 +183,72 @@
                   # Always clean workDir
                   find -H "$WORK_DIRECTORY" -mindepth 1 -delete
                 '';
-                generateToken = writeScript "test-script" ''
-                  set -x
-                  env
-                  echo "This is a test script"
-                  echo "Lets see if i can call it from another"
-                  echo "Without the script erroring"
-                  echo "${builtins.toJSON cfg.githubAppConfig}"
+                generateToken = with cfg.githubAppConfig;
+                  writeScript "generate-token" ''
+                    set -x
+                    echo "##############################"
+                    echo "Calling generateToken"
+                    echo "##############################"
 
+                    ${lib.optionalString (cfg.tokenFile != null) ''
+                    # Token is already "generated" so no need to generate one
+                    exit 0
+                    ''}
+
+                    ${lib.optionalString (cfg.tokenFile == null) ''
+
+                    installation_id="$(<"${installationIdFile}")"
+                    client_id="$(<"${clientIdFile}")"
+                    pkey="$(<"${privateKeyFile}")"
+
+                    registration_path="${if (orgName != null) then "/orgs/${orgName}" else "/repos/${repositoryOwner}/${repository}"}"
+
+                    now=$(date +%s)
+                    iat=$((''${now} - 60))
+                    exp=$((''${now} + 600))
+
+                    b64enc() {
+                      ${lib.getExe pkgs.openssl} base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n';
+                    }
+
+                    header_json='{"typ":"JWT","alg":"RS256"}'
+                    header=$(echo -n "''${header_json}" | b64enc)
+                    payload_json="{
+                      \"iat\": ''${iat},
+                      \"exp\": ''${exp},
+                      \"iss\": \"''${client_id}\"
+                    }"
+                    payload=$(echo -n "''${payload_json}" | b64enc)
+
+                    header_payload="''${header}.''${payload}"
+                    signature=$(
+                        ${lib.getExe pkgs.openssl}  dgst -sha256 -sign <(echo -n "''${pkey}") \
+                        <(echo -n "''${header_payload}") | b64enc
+                    )
+                    jwt="''${header_payload}.''${signature}"
+
+                    reg_token=$(
+                      ${lib.getExe pkgs.curl} --request POST \
+                        --silent \
+                        --url "https://api.github.com/app/installations/''${installation_id}/access_tokens" \
+                        --header "Accept: application/vnd.github+json" \
+                        --header "Authorization: Bearer "''${jwt}"" \
+                        --header "X-GitHub-Api-Version: 2022-11-28" \
+                        | ${lib.getExe pkgs.jq} -r '.token'
+                    )
+
+                    token=$(
+                      ${lib.getExe pkgs.curl} --request POST \
+                        --silent \
+                        --url "https://api.github.com''${registration_path}/actions/runners/registration-token" \
+                        --header "Accept: application/vnd.github+json" \
+                        --header "Authorization: Bearer "''${reg_token}"" \
+                        --header "X-GitHub-Api-Version: 2022-11-28" \
+                        | ${lib.getExe pkgs.jq} -r '.token'
+                    )
+
+                    echo -n "''${token}" > ${regTokenPath}
+                    ''}
                 '';
                 configureRunner =
                   writeScript "configure" # bash
@@ -243,14 +309,12 @@
                     ]
                   }"
                 )
-                (
-                  lib.optionals (cfg.githubAppConfig.enable) [ "+${generateToken}" ] ++
-                  [
-                    "+${unconfigureRunner}" # runs as root
-                    configureRunner
-                    setupWorkDir
-                  ]
-                );
+                [
+                  # "+${generateToken}"
+                  "+${unconfigureRunner}" # runs as root
+                  configureRunner
+                  setupWorkDir
+                ];
 
             # If running in ephemeral mode, restart the service on-exit (i.e., successful de-registration of the runner)
             # to trigger a fresh registration.
@@ -271,6 +335,7 @@
             InaccessiblePaths = [
               # Token file path given in the configuration, if visible to the service
               #"-${cfg.tokenFile}"
+              "-${regTokenPath}"
               "/run/secrets/runner_token"
               # Token file in the state directory
               "${stateDir}/${currentConfigTokenFilename}"

@@ -113,19 +113,42 @@
 
                   enable = lib.mkEnableOption "enable";
 
-                  githubAppInstallationIdFile = lib.mkOption {
+                  repository = lib.mkOption {
+                    default = { };
+                    description = "Repository options";
+                    type = lib.types.submodule {
+                      options = {
+                        owner = lib.mkOption {
+                          type = lib.types.str;
+                          description = "Owner of the repository being registered";
+                        };
+                        name = lib.mkOption {
+                          type = lib.types.str;
+                          description = "Name of the repository being registered";
+                        };
+                      };
+                    };
+                  };
+
+                  orgName = lib.mkOption {
+                    type = lib.types.nullOr lib.types.str;
+                    default = null;
+                    description = "Name of the org to register runner for";
+                  };
+
+                  installationIdFile = lib.mkOption {
                     type = lib.types.path;
                     example = "/run/secrets/github-runner/github-app-installation-id";
                     description = "Installation ID of github app";
                   };
 
-                  githubAppClientIdFile = lib.mkOption {
+                  clientIdFile = lib.mkOption {
                     type = lib.types.path;
                     example = "/run/secrets/github-runner/github-app-id";
                     description = "ClientId of github app";
                   };
 
-                  githubAppPrivateKeyFile = lib.mkOption {
+                  privateKeyFile = lib.mkOption {
                     type = lib.types.path;
                     example = "/run/secrets/github-runner/github-app-private-key";
                     description = "Github app private key file path";
